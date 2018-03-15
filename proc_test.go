@@ -14,7 +14,7 @@ func TestSplitOutputLine(t *testing.T) {
 	}
 	for i := range words {
 		if words[i] != expected[i] {
-			t.Errorf("word %d is '%s', expected '%s'", i, words[i], expected[i])
+			t.Errorf("word %d is %q, expected '%s'", i, words[i], expected[i])
 		}
 	}
 }

@@ -23,11 +23,11 @@ type actionOpts map[string]interface{}
 func (a actionOpts) getString(k string) (string, error) {
 	v, ok := a[k]
 	if !ok {
-		return "", fmt.Errorf("key '%s' not found", k)
+		return "", fmt.Errorf("key %q not found", k)
 	}
 	s, ok := v.(string)
 	if !ok {
-		return "", fmt.Errorf("key '%s' has value '%+v' which is not a string", k, v)
+		return "", fmt.Errorf("key %q has value '%+v' which is not a string", k, v)
 	}
 	return s, nil
 }
@@ -39,15 +39,15 @@ func (a actionOpts) getDuration(k string) (time.Duration, error) {
 	)
 	v, ok := a[k]
 	if !ok {
-		return d, fmt.Errorf("key '%s' not found", k)
+		return d, fmt.Errorf("key %q not found", k)
 	}
 	s, ok := v.(string)
 	if !ok {
-		return d, fmt.Errorf("key '%s' has value '%+v' which is not a duration string", k, v)
+		return d, fmt.Errorf("key %q has value '%+v' which is not a duration string", k, v)
 	}
 	d, err = time.ParseDuration(s)
 	if err != nil {
-		return d, fmt.Errorf("key '%s' has value '%+v' which is not a duration: %v", k, v, err)
+		return d, fmt.Errorf("key %q has value '%+v' which is not a duration: %v", k, v, err)
 	}
 	return d, nil
 }
@@ -55,12 +55,12 @@ func (a actionOpts) getDuration(k string) (time.Duration, error) {
 func (a actionOpts) getInt(k string) (int, error) {
 	v, ok := a[k]
 	if !ok {
-		return 0, fmt.Errorf("key '%s' not found", k)
+		return 0, fmt.Errorf("key %q not found", k)
 	}
 	if s, ok := v.(string); ok {
 		i, err := strconv.ParseInt(s, 10, 32)
 		if err != nil {
-			return 0, fmt.Errorf("key '%s' has value '%+v' which is not an integer: %v", k, v, err)
+			return 0, fmt.Errorf("key %q has value '%+v' which is not an integer: %v", k, v, err)
 		}
 		return int(i), nil
 	}
@@ -73,7 +73,7 @@ func (a actionOpts) getInt(k string) (int, error) {
 	if i, ok := v.(int64); ok {
 		return int(i), nil
 	}
-	return 0, fmt.Errorf("key '%s' has value '%+v' which is not an integer", k, v)
+	return 0, fmt.Errorf("key %q has value '%+v' which is not an integer", k, v)
 }
 
 type config struct {
@@ -167,7 +167,7 @@ func buildTests(testscf map[string][]actionOpts) (map[string][]action, error) {
 		for i, opts := range acts {
 			a, err := buildAction(opts)
 			if err != nil {
-				return nil, fmt.Errorf("error in test '%s': %v", name, err)
+				return nil, fmt.Errorf("error in test %q: %v", name, err)
 			}
 			actions[i] = a
 		}

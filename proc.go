@@ -8,6 +8,7 @@ import (
 	"io"
 	"log"
 	"os/exec"
+	"time"
 )
 
 var errRunRetry = errors.New("retry")
@@ -15,12 +16,34 @@ var errRunRetry = errors.New("retry")
 type retryFn func(r io.Reader) error
 
 func ocScale(dc string, replicas int) error {
-	// TODO: oc scale --replicas=$replicas $dc
-	//		 runUntil(oc get dc/$dc, ocStatusIsDesired(dc), 1 second)
+	if err := exec.Command("oc", "scale", fmt.Sprintf("--replicas=%d", replicas), dc).Run(); err != nil {
+		return fmt.Errorf("could not run oc scale to %d for dc %s: %v", replicas, dc, err)
+	}
+	if err := runUntil(exec.Command("oc", "get", fmt.Sprintf("dc/%s", dc)), ocStatusIsDesired(dc), 1 second); err != nil {
+		// TODO: error here should convey that we want to run the finalizer (scale to zero)
+		return fmt.Errorf("could not satisfy scaling change to dc: %v", err)
+	}
+	return nil
 }
 
 func ocLogs(dc string, m *matcher) error {
-	// TODO: oc logs -f dc/$dc
+	cmd := exec.Command("oc", "logs", "-f", fmt.Sprintf("dc/%s", dc))
+	var (
+		out bufio.Buffer
+		oerr bufio.Buffer
+	)
+	cmd.Stdout = &out
+	cmd.Stderr = &oerr
+	m.reader = &out
+	done := make(chan struct{})
+	go m.run(done)
+	go m.slurp(3) // TODO: Number of lines between updates, move up
+	cmd.Start()
+	<-done
+	if err := cmd.Wait(); err != nil {
+		return fmt.Errorf("error running oc logs on %s: %v", dc, err)
+	}
+	return nil
 }
 
 func ocStatusIsDesired(pod string) retryFn {
@@ -33,7 +56,7 @@ func ocStatusIsDesired(pod string) retryFn {
 		for sc.Scan() {
 			fields := split(sc.Bytes())
 			if len(fields) != 5 {
-				return fmt.Errorf("expected 5 fields in line '%s'", sc.Text())
+				return fmt.Errorf("expected 5 fields in line %q", sc.Text())
 			}
 			if fields[0] != pod {
 				continue
@@ -121,7 +144,7 @@ func newMatcher(r io.Reader, match []string) *matcher {
 	}
 }
 
-func (m *matcher) run() {
+func (m *matcher) run(done chan struct{}) {
 	for st := range m.update {
 		m.status.nlines += st.nlines
 		m.status.matches += st.matches
@@ -130,6 +153,7 @@ func (m *matcher) run() {
 			log.Printf("[error] %v", st.err) // TODO: context etc
 		}
 	}
+	close(done)
 }
 
 func (m *matcher) matches(bs []byte) bool {

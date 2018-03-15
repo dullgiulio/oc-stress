@@ -1,0 +1,20 @@
+{
+	"Images": {
+		"sender": "test-shutdown-receiver",
+		"receiver": "test-shutdown-sender"
+	},
+	"Options": {
+		"RateSecond": 10, # Estimate ten messages per second
+		"LostMatch": "Timed out",
+		"CrashMatch": "exception"
+	},
+	"Tests": {
+		"Scale up same rate": [
+			{"Action": "scale", "Pod": "sender", "Units": "10"},
+			{"Action": "scale", "Pod": "receiver", "Units": "10"},
+			{"Action": "pause", "For": "40s"},
+			{"Action": "scale", "Pod": "sender", "Units": "1"},
+			{"Action": "scale", "Pod": "receiver", "Units": "2"}
+		]
+	}
+}
