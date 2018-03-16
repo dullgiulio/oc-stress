@@ -6,7 +6,6 @@ import (
 	"errors"
 	"fmt"
 	"io"
-	"log"
 	"os/exec"
 	"time"
 )
@@ -16,34 +15,38 @@ var errRunRetry = errors.New("retry")
 type retryFn func(r io.Reader) error
 
 func ocScale(dc string, replicas int) error {
-	if err := exec.Command("oc", "scale", fmt.Sprintf("--replicas=%d", replicas), dc).Run(); err != nil {
-		return fmt.Errorf("could not run oc scale to %d for dc %s: %v", replicas, dc, err)
+	if output, err := exec.Command("oc", "scale", fmt.Sprintf("--replicas=%d", replicas), fmt.Sprintf("dc/%s", dc)).CombinedOutput(); err != nil {
+		return fmt.Errorf("could not run oc scale to %d for dc %s: %v: %q", replicas, dc, err, string(output))
 	}
-	if err := runUntil(exec.Command("oc", "get", fmt.Sprintf("dc/%s", dc)), ocStatusIsDesired(dc), 1 second); err != nil {
-		// TODO: error here should convey that we want to run the finalizer (scale to zero)
+	if err := runUntil(exec.Command("oc", "get", fmt.Sprintf("dc/%s", dc)), ocStatusIsDesired(dc), 1*time.Second); err != nil {
 		return fmt.Errorf("could not satisfy scaling change to dc: %v", err)
 	}
 	return nil
 }
 
-func ocLogs(dc string, m *matcher) error {
+func ocLogs(dc string, m *matcher, errs chan<- error) {
 	cmd := exec.Command("oc", "logs", "-f", fmt.Sprintf("dc/%s", dc))
 	var (
-		out bufio.Buffer
-		oerr bufio.Buffer
+		out  bytes.Buffer
+		oerr bytes.Buffer
 	)
 	cmd.Stdout = &out
 	cmd.Stderr = &oerr
-	m.reader = &out
 	done := make(chan struct{})
-	go m.run(done)
-	go m.slurp(3) // TODO: Number of lines between updates, move up
-	cmd.Start()
-	<-done
-	if err := cmd.Wait(); err != nil {
-		return fmt.Errorf("error running oc logs on %s: %v", dc, err)
+	go m.run(done, errs)
+	go m.slurp(&out, 3) // TODO: Number of lines between updates, move up
+	var failed bool
+	if err := cmd.Start(); err != nil {
+		errs <- fmt.Errorf("cannot start oc logs command on %s: %v", dc, err)
+		failed = true
 	}
-	return nil
+	<-done
+	if !failed {
+		if err := cmd.Wait(); err != nil {
+			errs <- fmt.Errorf("error running oc logs on %s: %v", dc, err)
+		}
+	}
+	close(errs)
 }
 
 func ocStatusIsDesired(pod string) retryFn {
@@ -126,31 +129,30 @@ type mstatus struct {
 }
 
 type matcher struct {
-	reader io.Reader
 	match  [][]byte
 	update chan *mstatus
 	status *mstatus
 }
 
-func newMatcher(r io.Reader, match []string) *matcher {
+func newMatcher(match []string) *matcher {
 	bms := make([][]byte, len(match))
 	for i, m := range match {
 		bms[i] = []byte(m)
 	}
 	return &matcher{
-		reader: r,
 		match:  bms,
+		status: &mstatus{},
 		update: make(chan *mstatus),
 	}
 }
 
-func (m *matcher) run(done chan struct{}) {
+func (m *matcher) run(done chan struct{}, errs chan<- error) {
 	for st := range m.update {
 		m.status.nlines += st.nlines
 		m.status.matches += st.matches
 		m.status.err = st.err
 		if st.err != nil {
-			log.Printf("[error] %v", st.err) // TODO: context etc
+			errs <- st.err
 		}
 	}
 	close(done)
@@ -165,8 +167,8 @@ func (m *matcher) matches(bs []byte) bool {
 	return false
 }
 
-func (m *matcher) slurp(updateEvery int64) {
-	sc := bufio.NewScanner(m.reader)
+func (m *matcher) slurp(r io.Reader, updateEvery int64) {
+	sc := bufio.NewScanner(r)
 	st := &mstatus{}
 	for sc.Scan() {
 		if m.matches(sc.Bytes()) {

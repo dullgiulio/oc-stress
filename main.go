@@ -91,33 +91,39 @@ func newConfig() *config {
 }
 
 type action interface {
-	init(opts actionOpts) error
+	init(opts actionOpts, images map[string]string) error
 	run() error
 }
 
 type scaleAction struct {
-	pod          string
-	wantedUnits  int
-	currentUnits int
+	pod   string
+	units int
 }
 
-func (s *scaleAction) init(opts actionOpts) error {
-	var err error
+func (s *scaleAction) init(opts actionOpts, images map[string]string) error {
+	var (
+		ok  bool
+		err error
+	)
 	s.pod, err = opts.getString("Pod")
 	if err != nil {
 		return fmt.Errorf("invalid 'Pod' option in 'scale' action: %v", err)
 	}
-	s.wantedUnits, err = opts.getInt("Units")
+	if s.pod, ok = images[s.pod]; !ok {
+		return fmt.Errorf("invalid 'Pod' option in 'scale' action: image %s not defined in Images section", s.pod)
+	}
+	s.units, err = opts.getInt("Units")
 	if err != nil {
 		return fmt.Errorf("invalid 'Units' option in 'scale' action: %v", err)
 	}
-	// TODO: determine current units via oc command
 	return nil
 }
 
 func (s *scaleAction) run() error {
-	// TODO
-	fmt.Printf("running scale of pod %s to %d units\n", s.pod, s.wantedUnits)
+	log.Printf("[step] scaling %s to %d units", s.pod, s.units)
+	if err := ocScale(s.pod, s.units); err != nil {
+		return fmt.Errorf("cannot run scale step: %v", err)
+	}
 	return nil
 }
 
@@ -125,7 +131,7 @@ type pauseAction struct {
 	duration time.Duration
 }
 
-func (p *pauseAction) init(opts actionOpts) error {
+func (p *pauseAction) init(opts actionOpts, images map[string]string) error {
 	var err error
 	p.duration, err = opts.getDuration("For")
 	if err != nil {
@@ -135,12 +141,12 @@ func (p *pauseAction) init(opts actionOpts) error {
 }
 
 func (p *pauseAction) run() error {
-	// TODO
-	fmt.Printf("running pause for %v\n", p.duration)
+	log.Printf("[step] sleeping for %s", &p.duration)
+	time.Sleep(p.duration)
 	return nil
 }
 
-func buildAction(opts actionOpts) (action, error) {
+func buildAction(opts actionOpts, images map[string]string) (action, error) {
 	var a action
 	name, err := opts.getString("Action")
 	if err != nil {
@@ -154,18 +160,18 @@ func buildAction(opts actionOpts) (action, error) {
 	default:
 		return nil, fmt.Errorf("invalid action type %s", name)
 	}
-	if err = a.init(opts); err != nil {
+	if err = a.init(opts, images); err != nil {
 		return nil, fmt.Errorf("cannot init action %s: %v", name, err)
 	}
 	return a, nil
 }
 
-func buildTests(testscf map[string][]actionOpts) (map[string][]action, error) {
+func buildTests(testscf map[string][]actionOpts, images map[string]string) (map[string][]action, error) {
 	tests := make(map[string][]action)
 	for name, acts := range testscf {
 		actions := make([]action, len(acts))
 		for i, opts := range acts {
-			a, err := buildAction(opts)
+			a, err := buildAction(opts, images)
 			if err != nil {
 				return nil, fmt.Errorf("error in test %q: %v", name, err)
 			}
@@ -192,16 +198,22 @@ func main() {
 	if err := dec.Decode(&config); err != nil {
 		log.Fatalf("cannot decode JSON configuration from %s: %v", cfile, err)
 	}
-	tests, err := buildTests(config.Tests)
+	tests, err := buildTests(config.Tests, config.Images)
 	config.Tests = nil
+	errs := make(chan error, 10)
+	go ocLogs(config.Images["sender"], newMatcher([]string{config.Options.LostMatch}), errs)
+	go func(pod string) {
+		for err := range errs {
+			log.Printf("[logs] %s: error: %s", pod, err)
+		}
+	}(config.Images["sender"])
 	for name, actions := range tests {
-		fmt.Printf("[start] %s\n", name)
+		log.Printf("[step] start %s\n", name)
 		for i := range actions {
 			if err := actions[i].run(); err != nil {
-				log.Fatal("error while running action: %v", err)
-				// TODO: run finalizers
+				log.Printf("[step] error while running action: %v", err)
 			}
 		}
-		fmt.Printf("[end] %s\n", name)
+		log.Printf("[step] end %s\n", name)
 	}
 }
