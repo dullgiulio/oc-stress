@@ -14,11 +14,38 @@ var errRunRetry = errors.New("retry")
 
 type retryFn func(r io.Reader) error
 
+type retryCmd struct {
+	verify retryFn
+	cmd    *exec.Cmd
+}
+
+func (r *retryCmd) run(max int, sleep time.Duration) error {
+	for i := 0; i < max; i++ {
+		out, err := r.cmd.CombinedOutput()
+		if err != nil {
+			return fmt.Errorf("could not run command: %v: %q", err, out)
+		}
+		err = r.verify(bytes.NewReader(out))
+		if err == nil {
+			return nil
+		}
+		if err != errRunRetry {
+			return fmt.Errorf("could not verify command output: %v", err)
+		}
+		time.Sleep(sleep)
+	}
+	return fmt.Errorf("could not reach expected result after %d retries", max)
+}
+
 func ocScale(dc string, replicas int) error {
 	if output, err := exec.Command("oc", "scale", fmt.Sprintf("--replicas=%d", replicas), fmt.Sprintf("dc/%s", dc)).CombinedOutput(); err != nil {
 		return fmt.Errorf("could not run oc scale to %d for dc %s: %v: %q", replicas, dc, err, string(output))
 	}
-	if err := runUntil(exec.Command("oc", "get", fmt.Sprintf("dc/%s", dc)), ocStatusIsDesired(dc), 1*time.Second); err != nil {
+	retry := &retryCmd{
+		cmd:    exec.Command("oc", "get", fmt.Sprintf("dc/%s", dc)),
+		verify: ocStatusIsDesired(dc),
+	}
+	if err := retry.run(replicas*10, 1*time.Second); err != nil {
 		return fmt.Errorf("could not satisfy scaling change to dc: %v", err)
 	}
 	return nil
@@ -102,24 +129,6 @@ func split(line []byte) []string {
 
 func isspace(b byte) bool {
 	return b == ' ' || b == '\t' || b == '\v' || b == '\n'
-}
-
-func runUntil(cmd *exec.Cmd, fn retryFn, sleep time.Duration) error {
-	for {
-		out, err := cmd.Output()
-		if err != nil {
-			return err
-		}
-		err = fn(bytes.NewReader(out))
-		if err == nil {
-			return nil
-		}
-		if err != errRunRetry {
-			return err
-		}
-		time.Sleep(sleep)
-	}
-	return nil
 }
 
 type mstatus struct {
