@@ -7,6 +7,7 @@ import (
 	"log"
 	"os"
 	"strconv"
+	"sync"
 	"time"
 
 	"github.com/dullgiulio/oc-stress/jsoncomments"
@@ -98,6 +99,7 @@ type action interface {
 type scaleAction struct {
 	pod   string
 	units int
+	up    chan<- string
 }
 
 func (s *scaleAction) init(opts actionOpts, images map[string]string) error {
@@ -124,6 +126,9 @@ func (s *scaleAction) run() error {
 	if err := ocScale(s.pod, s.units); err != nil {
 		return fmt.Errorf("cannot run scale step: %v", err)
 	}
+	if s.units > 0 {
+		s.up <- s.pod
+	}
 	return nil
 }
 
@@ -146,7 +151,7 @@ func (p *pauseAction) run() error {
 	return nil
 }
 
-func buildAction(opts actionOpts, images map[string]string) (action, error) {
+func buildAction(opts actionOpts, images map[string]string, up chan<- string) (action, error) {
 	var a action
 	name, err := opts.getString("Action")
 	if err != nil {
@@ -154,7 +159,7 @@ func buildAction(opts actionOpts, images map[string]string) (action, error) {
 	}
 	switch name {
 	case "scale":
-		a = &scaleAction{}
+		a = &scaleAction{up: up}
 	case "pause":
 		a = &pauseAction{}
 	default:
@@ -166,12 +171,12 @@ func buildAction(opts actionOpts, images map[string]string) (action, error) {
 	return a, nil
 }
 
-func buildTests(testscf map[string][]actionOpts, images map[string]string) (map[string][]action, error) {
+func buildTests(testscf map[string][]actionOpts, images map[string]string, up chan<- string) (map[string][]action, error) {
 	tests := make(map[string][]action)
 	for name, acts := range testscf {
 		actions := make([]action, len(acts))
 		for i, opts := range acts {
-			a, err := buildAction(opts, images)
+			a, err := buildAction(opts, images, up)
 			if err != nil {
 				return nil, fmt.Errorf("error in test %q: %v", name, err)
 			}
@@ -180,6 +185,33 @@ func buildTests(testscf map[string][]actionOpts, images map[string]string) (map[
 		tests[name] = actions
 	}
 	return tests, nil
+}
+
+func startLogReaders(imgs <-chan string, errs chan<- error) {
+	log.Printf("[debug] starting logs loop")
+	var wg sync.WaitGroup
+	for img := range imgs {
+		wg.Add(1)
+		go func() {
+			// TODO: not sure it's really necessary to loop on oc logs
+			for i := 0; i < 5; i++ {
+				if err := ocLogs(img, errs); err == nil {
+					break
+				}
+				time.Sleep(1 * time.Second)
+			}
+			wg.Done()
+		}()
+	}
+	wg.Wait()
+	close(errs)
+}
+
+func logErrors(errs <-chan error, done chan<- struct{}) {
+	for err := range errs {
+		log.Printf("[logs] error: %s", err)
+	}
+	close(done)
 }
 
 func main() {
@@ -198,15 +230,13 @@ func main() {
 	if err := dec.Decode(&config); err != nil {
 		log.Fatalf("cannot decode JSON configuration from %s: %v", cfile, err)
 	}
-	tests, err := buildTests(config.Tests, config.Images)
+	runningdc := make(chan string, len(config.Images)) // XXX: this might wait for logging to be ready
+	tests, err := buildTests(config.Tests, config.Images, runningdc)
 	config.Tests = nil
 	errs := make(chan error, 10)
-	go ocLogs(config.Images["sender"], newMatcher([]string{config.Options.LostMatch}), errs)
-	go func(pod string) {
-		for err := range errs {
-			log.Printf("[logs] %s: error: %s", pod, err)
-		}
-	}(config.Images["sender"])
+	errsDone := make(chan struct{})
+	go startLogReaders(runningdc, errs)
+	go logErrors(errs, errsDone)
 	for name, actions := range tests {
 		log.Printf("[step] start %s\n", name)
 		for i := range actions {
@@ -216,4 +246,6 @@ func main() {
 		}
 		log.Printf("[step] end %s\n", name)
 	}
+	close(runningdc)
+	<-errsDone
 }
